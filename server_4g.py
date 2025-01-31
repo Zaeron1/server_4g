@@ -106,6 +106,8 @@ def index():
         <!-- Plotly.js -->
         <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <script type="text/javascript">
+          var gaugeChart;
+
           function drawGauge(value) {
             var data = [
               {
@@ -136,13 +138,61 @@ def index():
               font: { color: "darkblue", family: "Arial" }
             };
 
-            Plotly.newPlot('gauge_div', data, layout);
+            if (!gaugeChart) {
+              gaugeChart = Plotly.newPlot('gauge_div', data, layout);
+            } else {
+              Plotly.update('gauge_div', { value: [value] }, layout);
+            }
           }
 
-          // Dessiner la gauge avec la valeur passée par Flask
+          function updateTable(measurements) {
+            var tableBody = document.getElementById("measurements-body");
+            tableBody.innerHTML = ""; // Efface le contenu actuel
+
+            measurements.forEach(function(measure) {
+                var row = document.createElement("tr");
+
+                var cellId = document.createElement("td");
+                cellId.textContent = measure.id;
+                row.appendChild(cellId);
+
+                var cellTemp = document.createElement("td");
+                cellTemp.textContent = measure.temperature;
+                row.appendChild(cellTemp);
+
+                var cellTime = document.createElement("td");
+                cellTime.textContent = measure.timestamp;
+                row.appendChild(cellTime);
+
+                tableBody.appendChild(row);
+            });
+          }
+
+          function fetchData() {
+            fetch('/api/data')
+              .then(response => response.json())
+              .then(data => {
+                  if (data.status === "success") {
+                      var measurements = data.measurements;
+                      if (measurements.length > 0) {
+                          var last_temp = measurements[0].temperature;
+                          drawGauge(last_temp);
+                          updateTable(measurements);
+                      }
+                  } else {
+                      console.error("Erreur lors de la récupération des données :", data.message);
+                  }
+              })
+              .catch(error => {
+                  console.error("Erreur lors de la requête fetch :", error);
+              });
+          }
+
+          // Charger les données initiales au chargement de la page
           document.addEventListener("DOMContentLoaded", function() {
-              var temp = {{ last_temp }};
-              drawGauge(temp);
+              fetchData();
+              // Mettre à jour toutes les 5 secondes (5000 millisecondes)
+              setInterval(fetchData, 5000);
           });
         </script>
     </head>
@@ -151,23 +201,49 @@ def index():
         <div id="gauge_div"></div>
 
         <table>
-            <tr>
-                <th>ID</th>
-                <th>Température (°C)</th>
-                <th>Horodatage</th>
-            </tr>
-            {% for m in measurements %}
-            <tr>
-                <td>{{ m.id }}</td>
-                <td>{{ m.temperature }}</td>
-                <td>{{ m.timestamp }}</td>
-            </tr>
-            {% endfor %}
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Température (°C)</th>
+                    <th>Horodatage</th>
+                </tr>
+            </thead>
+            <tbody id="measurements-body">
+                {% for m in measurements %}
+                <tr>
+                    <td>{{ m.id }}</td>
+                    <td>{{ m.temperature }}</td>
+                    <td>{{ m.timestamp }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
         </table>
     </body>
     </html>
     """
     return render_template_string(html_template, measurements=measurements, last_temp=last_temp)
+
+@app.route("/api/data", methods=["GET"])
+def get_data():
+    """
+    Endpoint qui renvoie toutes les mesures de température au format JSON.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, temperature, timestamp FROM measurements ORDER BY id DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    measurements = []
+    for row in rows:
+        measurements.append({
+            'id': row[0],
+            'temperature': row[1],
+            'timestamp': row[2].strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+    return jsonify({"status": "success", "measurements": measurements}), 200
 
 @app.route("/api/receiver", methods=["POST"])
 def api_receiver():
@@ -207,4 +283,4 @@ def api_receiver():
 
 if __name__ == "__main__":
     # En local, si vous lancez python server_4g.py, on initialise la DB et on run
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
