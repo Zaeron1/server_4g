@@ -6,7 +6,6 @@ from flask import Flask, request, jsonify, render_template_string
 from datetime import datetime
 
 app = Flask(__name__)
-
 DATABASE = 'measurements.db'
 
 
@@ -25,20 +24,22 @@ def init_db():
         ''')
         conn.commit()
 
+@app.before_first_request
+def initialize_database():
+    """
+    Appelé par Flask avant la toute première requête,
+    pour s'assurer que la base est prête.
+    """
+    init_db()
 
 @app.route("/", methods=["GET"])
 def index():
-    """
-    Page d'accueil : affiche la dernière mesure sous forme de gauge
-    et la liste de toutes les mesures sous forme de tableau.
-    """
-    # Récupérer toutes les mesures depuis la base
     with sqlite3.connect(DATABASE) as conn:
         cur = conn.cursor()
+        # Récupération de toutes les mesures (ordre descendant)
         cur.execute("SELECT id, temperature, timestamp FROM measurements ORDER BY id DESC")
         rows = cur.fetchall()
 
-    # Conversion en liste de dictionnaires (plus pratique)
     measurements = []
     for row in rows:
         measurements.append({
@@ -47,11 +48,10 @@ def index():
             'timestamp': row[2]
         })
 
-    # On récupère la dernière température (si elle existe)
+    # Dernière mesure
     last_temp = measurements[0]['temperature'] if measurements else 0
 
-    # Template HTML + Jinja2 pour la gauge et le tableau
-    # - Google Charts pour la gauge
+    # Template avec gauge Google Charts
     html_template = """
     <!DOCTYPE html>
     <html>
@@ -81,10 +81,9 @@ def index():
             }
             th { background: #f0f0f0; }
         </style>
-        <!-- Chargement de la librairie Google Charts -->
+        <!-- Google Charts -->
         <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
         <script type="text/javascript">
-          // On charge le package "gauge"
           google.charts.load('current', {'packages':['gauge']});
           google.charts.setOnLoadCallback(drawGauge);
 
@@ -109,11 +108,8 @@ def index():
     </head>
     <body>
         <h1>Visualisation des Températures</h1>
-
-        <!-- Gauge -->
         <div id="gauge_div"></div>
 
-        <!-- Tableau des mesures -->
         <table>
             <tr>
                 <th>ID</th>
@@ -131,17 +127,10 @@ def index():
     </body>
     </html>
     """
-    return render_template_string(html_template, 
-                                  measurements=measurements, 
-                                  last_temp=last_temp)
-
+    return render_template_string(html_template, measurements=measurements, last_temp=last_temp)
 
 @app.route("/api/receiver", methods=["POST"])
 def api_receiver():
-    """
-    Endpoint où l'Arduino envoie ses données en POST (JSON).
-    On insère dans la base SQLite.
-    """
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"status": "error", "message": "No JSON received"}), 400
@@ -152,7 +141,6 @@ def api_receiver():
 
     timestamp = datetime.now().isoformat()
 
-    # Insertion en base
     with sqlite3.connect(DATABASE) as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO measurements (temperature, timestamp) VALUES (?, ?)",
@@ -162,11 +150,6 @@ def api_receiver():
     print(f"[DEBUG] Nouvelle donnée reçue : {temperature} °C à {timestamp}")
     return jsonify({"status": "success", "message": "Data received"}), 200
 
-
 if __name__ == "__main__":
-    # Initialisation de la base avant de lancer le serveur
-    init_db()
-
-    # Lancement du serveur Flask sur le port 5000
-    # host='0.0.0.0' le rend accessible sur le LAN
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # En local, si vous lancez python app.py, on initialise la DB et on run
+    app.run(host='0.0.0.0', port=500, debug=True)
