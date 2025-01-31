@@ -1,57 +1,72 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sqlite3
+import os
+import psycopg2
 from flask import Flask, request, jsonify, render_template_string
 from datetime import datetime
 
 app = Flask(__name__)
-DATABASE = 'measurements.db'
 
+# Configuration de la connexion PostgreSQL
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+if not DATABASE_URL:
+    raise ValueError("La variable d'environnement DATABASE_URL n'est pas définie.")
+
+def get_db_connection():
+    """
+    Établit une connexion à la base de données PostgreSQL.
+    """
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
 
 def init_db():
     """
     Crée la table 'measurements' si elle n'existe pas déjà.
     """
-    with sqlite3.connect(DATABASE) as conn:
-        cur = conn.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS measurements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                temperature REAL NOT NULL,
-                timestamp TEXT NOT NULL
-            )
-        ''')
-        conn.commit()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS measurements (
+            id SERIAL PRIMARY KEY,
+            temperature REAL NOT NULL,
+            timestamp TIMESTAMP NOT NULL
+        )
+    ''')
+    conn.commit()
+    cur.close()
+    conn.close()
 
-@app.before_first_request
-def initialize_database():
-    """
-    Appelé par Flask avant la toute première requête,
-    pour s'assurer que la base est prête.
-    """
-    init_db()
+# Initialisation de la base de données au démarrage de l'application
+init_db()
 
 @app.route("/", methods=["GET"])
 def index():
-    with sqlite3.connect(DATABASE) as conn:
-        cur = conn.cursor()
-        # Récupération de toutes les mesures (ordre descendant)
-        cur.execute("SELECT id, temperature, timestamp FROM measurements ORDER BY id DESC")
-        rows = cur.fetchall()
+    """
+    Page d'accueil : affiche la dernière mesure sous forme de gauge
+    et la liste de toutes les mesures sous forme de tableau.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Récupération de toutes les mesures (ordre descendant)
+    cur.execute("SELECT id, temperature, timestamp FROM measurements ORDER BY id DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
 
     measurements = []
     for row in rows:
         measurements.append({
             'id': row[0],
             'temperature': row[1],
-            'timestamp': row[2]
+            'timestamp': row[2].strftime("%Y-%m-%d %H:%M:%S")
         })
 
     # Dernière mesure
     last_temp = measurements[0]['temperature'] if measurements else 0
 
-    # Template avec gauge Google Charts
+    # Template avec gauge Plotly
     html_template = """
     <!DOCTYPE html>
     <html>
@@ -62,48 +77,73 @@ def index():
             body {
                 font-family: Arial, sans-serif;
                 margin: 20px;
+                background-color: #f9f9f9;
             }
-            h1 { color: #333; }
+            h1 { color: #333; text-align: center; }
             #gauge_div {
-                width: 400px; 
-                height: 200px; 
+                width: 450px; 
+                height: 350px; 
                 margin: 0 auto;
             }
             table {
                 border-collapse: collapse; 
-                margin-top: 30px; 
-                width: 80%;
+                margin: 30px auto; 
+                width: 90%;
+                background-color: #fff;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             }
             th, td { 
-                border: 1px solid #ccc; 
-                padding: 8px 12px; 
+                border: 1px solid #ddd; 
+                padding: 12px 15px; 
                 text-align: center; 
             }
-            th { background: #f0f0f0; }
+            th { 
+                background-color: #4CAF50; 
+                color: white; 
+            }
+            tr:nth-child(even) {background-color: #f2f2f2;}
         </style>
-        <!-- Google Charts -->
-        <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+        <!-- Plotly.js -->
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
         <script type="text/javascript">
-          google.charts.load('current', {'packages':['gauge']});
-          google.charts.setOnLoadCallback(drawGauge);
+          function drawGauge(value) {
+            var data = [
+              {
+                type: "indicator",
+                mode: "gauge+number",
+                value: value,
+                title: { text: "Température (°C)", font: { size: 24 } },
+                gauge: {
+                  axis: { range: [0, 50], tickwidth: 1, tickcolor: "darkblue" },
+                  bar: { color: "darkblue" },
+                  bgcolor: "white",
+                  borderwidth: 2,
+                  bordercolor: "gray",
+                  steps: [
+                    { range: [0, 25], color: "green" },
+                    { range: [25, 35], color: "yellow" },
+                    { range: [35, 50], color: "red" }
+                  ],
+                }
+              }
+            ];
 
-          function drawGauge() {
-            var data = google.visualization.arrayToDataTable([
-              ['Label', 'Value'],
-              ['Temp °C', {{ last_temp }}]
-            ]);
-
-            var options = {
-              min: 0, max: 50,
-              yellowFrom: 25, yellowTo: 35,
-              redFrom: 35, redTo: 50,
-              greenFrom: 0, greenTo: 25,
-              minorTicks: 5
+            var layout = {
+              width: 450,
+              height: 350,
+              margin: { t: 25, r: 25, l: 25, b: 25 },
+              paper_bgcolor: "white",
+              font: { color: "darkblue", family: "Arial" }
             };
 
-            var chart = new google.visualization.Gauge(document.getElementById('gauge_div'));
-            chart.draw(data, options);
+            Plotly.newPlot('gauge_div', data, layout);
           }
+
+          // Dessiner la gauge avec la valeur passée par Flask
+          document.addEventListener("DOMContentLoaded", function() {
+              var temp = {{ last_temp }};
+              drawGauge(temp);
+          });
         </script>
     </head>
     <body>
@@ -131,6 +171,10 @@ def index():
 
 @app.route("/api/receiver", methods=["POST"])
 def api_receiver():
+    """
+    Endpoint où l'Arduino envoie ses données en POST (JSON).
+    On insère dans la base PostgreSQL.
+    """
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"status": "error", "message": "No JSON received"}), 400
@@ -139,17 +183,28 @@ def api_receiver():
     if temperature is None:
         return jsonify({"status": "error", "message": "No 'temperature' field found"}), 400
 
-    timestamp = datetime.now().isoformat()
+    try:
+        temperature = float(temperature)
+    except ValueError:
+        return jsonify({"status": "error", "message": "'temperature' must be a number"}), 400
 
-    with sqlite3.connect(DATABASE) as conn:
+    timestamp = datetime.now()
+
+    try:
+        conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO measurements (temperature, timestamp) VALUES (?, ?)",
+        cur.execute("INSERT INTO measurements (temperature, timestamp) VALUES (%s, %s)",
                     (temperature, timestamp))
         conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] Erreur lors de l'insertion dans la base de données : {e}")
+        return jsonify({"status": "error", "message": "Database insertion failed"}), 500
 
     print(f"[DEBUG] Nouvelle donnée reçue : {temperature} °C à {timestamp}")
     return jsonify({"status": "success", "message": "Data received"}), 200
 
 if __name__ == "__main__":
-    # En local, si vous lancez python app.py, on initialise la DB et on run
-    app.run(host='0.0.0.0', port=500, debug=True)
+    # En local, si vous lancez python server_4g.py, on initialise la DB et on run
+    app.run(host='0.0.0.0', port=5001, debug=True)
